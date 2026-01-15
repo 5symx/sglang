@@ -24,7 +24,7 @@ DP_ARGS = [
 
 # Accuracy thresholds
 GSM8K_BASELINE = 0.935
-GPQA_BASELINE = 0.835
+_BASELINE = 0.835
 
 
 class TestDeepseekV32Unified(unittest.TestCase):

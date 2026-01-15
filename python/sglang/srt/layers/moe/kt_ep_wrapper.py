@@ -316,6 +316,11 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         if self.tp_rank != 0 or self.wrapper is None:
             return torch.zeros_like(x)
 
+        current = torch.cuda.current_stream(x.device).cuda_stream
+        default = torch.cuda.default_stream(x.device).cuda_stream
+
+        assert current != default, f"Current stream {current} is the default stream {default}"
+
         # Wait for CPU computation and retrieve results
         return self.wrapper.sync_forward(
             x, torch.cuda.current_stream(x.device).cuda_stream

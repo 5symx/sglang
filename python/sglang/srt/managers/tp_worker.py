@@ -39,7 +39,7 @@ from sglang.srt.managers.schedule_batch import ModelWorkerBatch, ScheduleBatch
 from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors, ForwardMode
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import MultiprocessingSerializer, broadcast_pyobj, set_random_seed
 from sglang.srt.utils.hf_transformers_utils import (
@@ -52,6 +52,9 @@ from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 if TYPE_CHECKING:
     from sglang.srt.managers.cache_controller import LayerDoneCounter
     from sglang.srt.model_executor.model_runner import ModelRunner
+
+from sglang.srt.bullet.shared_mng import SelectedSMPolicy, SharedManager
+from sglang.srt.bullet.sm_controller import SMController
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +308,26 @@ class TpModelWorker(BaseTpWorker):
         self.enable_spec = server_args.speculative_algorithm is not None
         self.hicache_layer_transfer_counter = None
 
+        ## add bullet
+        if server_args.enable_bullet_engine: # True
+            logger.debug(f"set bullet with TPC for prefill")
+            self.forward_batch_generation = self.forward_batch_generation_bullet 
+            self.smctrl = SMController()
+            if server_args.is_bullet_prefill and self.tp_rank == 0:
+                self.shared_mng = SharedManager(server_args, create=True)
+                # self.forward_batch_generation = self.forward_batch_generation_prefill
+            else:
+                self.shared_mng = SharedManager(server_args, create=False)
+            self.is_bullet_prefill = server_args.is_bullet_prefill
+            self.is_bullet_decode = server_args.is_bullet_decode
+            self.forward_stream = torch.cuda.Stream(priority=-1 if server_args.is_bullet_decode else 0)
+            # self.forward_stream = torch.cuda.default_stream()
+            # self.pp_first_rank = self.pp_group.is_first_rank
+            # self.pp_last_rank = self.pp_group.is_last_rank
+            self.last_num_tpc = 0
+            
+
+
     def _init_model_config(self):
         from sglang.srt.configs.model_config import ModelConfig
 
@@ -425,6 +448,253 @@ class TpModelWorker(BaseTpWorker):
             self.model_runner.remote_instance_transfer_engine_session_id,
             self.model_runner.remote_instance_transfer_engine_weight_info,
         )
+
+    # bullet forward
+    def update_bullet_before_forward(self, model_worker_batch: ModelWorkerBatch, create_entry: bool = True):
+        """
+        1. Update shared manager states
+        2. Set adaptive TPCs
+        3. Record predictor info
+        """
+
+        if not self.server_args.enable_bullet_engine:
+            return None
+
+        # Record states
+        num_forward_tokens = model_worker_batch.input_ids.size(0)
+        self.shared_mng.rem_layers = self.model_runner.model.model.end_layer - self.model_runner.model.model.start_layer
+        # mixed with chunked prefill for kt
+        # if self.tp_rank == 0 and create_entry:
+        #     if model_worker_batch.forward_mode == ForwardMode.EXTEND:
+        #         self.shared_mng.prefill_size = num_forward_tokens
+        #     elif model_worker_batch.forward_mode == ForwardMode.DECODE:
+        #         self.shared_mng.decode_size = num_forward_tokens
+        #         self.shared_mng.decode_total_context = model_worker_batch.total_tokens
+        #     elif (
+        #         model_worker_batch.forward_mode == ForwardMode.IDLE
+        #         # or model_worker_batch.forward_mode == ForwardMode.DUMMY_FIRST()
+        #     ):
+        #         pass
+        #     else:
+        #         raise ValueError(f"Forward mode {model_worker_batch.forward_mode} is not supported.")
+
+        # Set adaptive TPCs
+        if model_worker_batch.forward_mode.is_extend():
+            num_tpcs, policy = self.shared_mng.set_adaptive_prefill_num_tpcs(
+                # model_worker_batch.longest_queue_ms
+                1000
+            )
+            logger.info(f"Prefill TPC {num_tpcs}, policy {policy}")
+        elif model_worker_batch.forward_mode.is_decode():
+            num_tpcs, policy = self.shared_mng.set_adaptive_decode_num_tpcs(
+                # model_worker_batch.longest_queue_ms
+                1000
+            )
+        else:
+            num_tpcs, policy = TOTAL_TPCS, SelectedSMPolicy.DEFAULT
+
+        if num_tpcs != self.last_num_tpc:
+            self.smctrl.set_stream_mask(
+                self.forward_stream,
+                0,
+                num_tpcs,
+                reversed=self.is_bullet_decode and not self.server_args.disable_decode_tpc_reverse,
+            )
+            self.last_num_tpc = num_tpcs
+
+        # Record predictor info
+        # if self.worker.tp_rank == 0 and create_entry:
+        #     phase = "prefill" if model_worker_batch.forward_mode == ForwardMode.EXTEND else "decode"
+        #     entry = PredictorInfoEntry(
+        #         phase=phase,
+        #         prefill_len=self.worker.shared_mng.prefill_size,
+        #         decode_bs=self.worker.shared_mng.decode_size,
+        #         decode_tokens=self.worker.shared_mng.decode_total_context,
+        #         prefill_tpc=self.worker.shared_mng.prefill_num_tpcs,
+        #         decode_tpc=self.worker.shared_mng.decode_num_tpcs,
+        #         predict_ms=self.worker.shared_mng.predict_duration(phase),
+        #         start_timstamp=time.time(),
+        #         policy=policy,
+        #         rids=model_worker_batch.rids,
+        #     )
+        # else:
+        #     entry = None
+        entry = None
+
+        return entry
+
+    def update_bullet_after_forward(self, entry: PredictorInfoEntry):
+
+        if entry is None:
+            return
+
+        if not self.server_args.enable_bullet_engine or self.tp_rank != 0:
+            return
+
+        gpu_ms = self.worker.timing_states.step(
+            ForwardMode.EXTEND if self.worker.is_bullet_prefill else ForwardMode.DECODE,
+            enable_gpu_timing=self.server_args.enable_gpu_timing,
+        )
+        _t = time.time()
+        _len = entry.prefill_len if self.worker.is_bullet_prefill else 1
+        entry.prefill_len_after = self.worker.shared_mng.prefill_size
+        self.worker.predictor_infos.add_entry(entry, _t, gpu_ms)
+        self.worker.shared_mng.set_real_norm_ms(entry.phase, (_t - entry.start_timstamp) * 1000 / _len)
+
+        if self.worker.is_bullet_prefill:
+            self.worker.shared_mng.prefill_size = 0
+            self.worker.shared_mng.prefill_num_tpcs = TOTAL_TPCS
+        elif self.worker.is_bullet_decode:
+            self.worker.shared_mng.decode_size = 0
+            self.worker.shared_mng.decode_total_context = 0
+            self.worker.shared_mng.decode_num_tpcs = TOTAL_TPCS
+        else:
+            raise ValueError("Invalid mode, should never reach here.")
+
+    def model_forward_with_bullet(
+        self,
+        model_worker_batch: ForwardBatch,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        skip_attn_backend_init=False,
+    ):
+        # forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
+        forward_batch = model_worker_batch
+
+
+        # out = self.model_runner.forward(
+        #     forward_batch, pp_proxy_tensors=pp_proxy_tensors, skip_attn_backend_init=skip_attn_backend_init
+        # )
+
+        # self.timing_states.begin_forward(
+        #     self.forward_stream, model_worker_batch.rids, enable_gpu_timing=self.server_args.enable_gpu_timing
+        # )
+        with torch.cuda.stream(self.forward_stream):
+            out = self.model_runner.forward(
+                forward_batch, pp_proxy_tensors=pp_proxy_tensors, skip_attn_backend_init=skip_attn_backend_init
+            )
+        # self.timing_states.end_forward(
+        #     self.forward_stream, enable_gpu_timing=self.server_args.enable_gpu_timing
+        # )
+        return out
+    
+
+    def forward_batch_generation_bullet(
+        self,
+        model_worker_batch: ModelWorkerBatch,
+        forward_batch: Optional[ForwardBatch] = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+        is_verify: bool = False,
+        skip_attn_backend_init=False,
+    ) -> GenerationBatchResult:
+
+        # entry = None
+        
+        # add bullet
+        entry = self.update_bullet_before_forward(model_worker_batch)
+
+        # FIXME(lsyin): maybe remove skip_attn_backend_init in forward_batch_generation,
+        #               which requires preparing replay to always be in this function
+
+        # Get forward batch from model worker batch
+        if model_worker_batch is not None:
+            # update the consumer index of hicache to the running batch
+            self.set_hicache_consumer(model_worker_batch.hicache_consumer_index)
+
+            forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
+        else:
+            # FIXME(lsyin): unify the interface of forward_batch
+            assert forward_batch is not None
+
+        if self.is_dllm():
+            return self._forward_batch_generation_dllm(forward_batch)
+
+        if self.pp_group.is_last_rank:
+            out = self.model_forward_with_bullet(
+                forward_batch,
+                pp_proxy_tensors=pp_proxy_tensors,
+                skip_attn_backend_init=skip_attn_backend_init,
+            )
+
+            # out = self.model_runner.forward(
+            #     forward_batch,
+            #     pp_proxy_tensors=pp_proxy_tensors,
+            #     skip_attn_backend_init=skip_attn_backend_init,
+            # )
+            logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
+            batch_result = GenerationBatchResult(
+                logits_output=logits_output,
+                can_run_cuda_graph=can_run_cuda_graph,
+                expert_distribution_metrics=out.expert_distribution_metrics,
+            )
+
+            if is_verify:
+                # Skip sampling and return logits for target forward
+                return batch_result
+
+            if (
+                self.enable_overlap
+                and not self.enable_spec
+                and model_worker_batch.sampling_info.grammars is not None
+            ):
+
+                def sample_batch_func():
+                    # with torch.cuda.stream(self.forward_stream):
+                    batch_result.next_token_ids = self.model_runner.sample(
+                        logits_output, forward_batch
+                    )
+                    return batch_result
+
+                batch_result.delay_sample_func = sample_batch_func
+                return batch_result
+
+            if not model_worker_batch.is_prefill_only:
+                # with torch.cuda.stream(self.forward_stream):
+                # For normal requests, sample the next token ids.
+                batch_result.next_token_ids = self.model_runner.sample(
+                    logits_output, forward_batch
+                )
+            else:
+                # For prefill-only requests, create dummy token IDs on CPU
+                # The size should match the batch size (number of sequences), not total tokens
+                batch_result.next_token_ids = torch.zeros(
+                    len(model_worker_batch.seq_lens),
+                    dtype=torch.long,
+                    device=model_worker_batch.input_ids.device,
+                )
+                if (
+                    model_worker_batch.return_logprob
+                    and logits_output.next_token_logits is not None
+                ):
+                    # NOTE: Compute logprobs without full sampling
+                    # with torch.cuda.stream(self.forward_stream):
+                    self.model_runner.compute_logprobs_only(
+                        logits_output, model_worker_batch
+                    )
+            # add
+            self.update_bullet_after_forward(entry)
+
+            return batch_result
+        else:
+            out = self.model_forward_with_bullet(
+                forward_batch,
+                pp_proxy_tensors=pp_proxy_tensors,
+                skip_attn_backend_init=skip_attn_backend_init,
+            )
+            # out = self.model_runner.forward(
+            #     forward_batch,
+            #     pp_proxy_tensors=pp_proxy_tensors,
+            #     skip_attn_backend_init=skip_attn_backend_init,
+            # )
+            pp_proxy_tensors, can_run_cuda_graph = out.logits_output, out.can_run_graph
+            
+            # add
+            self.update_bullet_after_forward(entry)
+
+            return GenerationBatchResult(
+                pp_hidden_states_proxy_tensors=pp_proxy_tensors,
+                can_run_cuda_graph=can_run_cuda_graph,
+                expert_distribution_metrics=out.expert_distribution_metrics,
+            )
 
     def forward_batch_generation(
         self,

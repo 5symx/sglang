@@ -145,4 +145,5 @@ if __name__ == "__main__":
     parser.add_argument("--data-path", type=str, default="test.jsonl")
     parser.add_argument("--num-questions", type=int, default=200)
     args = add_common_sglang_args_and_parse(parser)
+    args.port = 8001
     main(args)

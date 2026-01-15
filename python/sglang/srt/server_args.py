@@ -503,6 +503,20 @@ class ServerArgs:
     kt_num_gpu_experts: Optional[int] = None
     kt_max_deferred_experts_per_token: Optional[int] = None
 
+    ######################################################################################################
+    #############################     bullet args            #############################################
+    ######################################################################################################
+    enable_bullet_engine: bool = False
+    is_bullet_prefill : bool = True
+    is_bullet_decode: bool = False
+    enable_sm_partition: bool = True
+    
+    # engines_per_gpu: int = 1
+    # gpu_ids_this_node: List[List[int]] = dataclasses.field(default_factory=list)
+    # mps_pipe_dir: str = f"{BASE}/log/mps/nvidia-mps"
+    launcher_pid: int = os.getpid()
+
+
     # Diffusion LLM
     dllm_algorithm: Optional[str] = None
     dllm_algorithm_config: Optional[str] = None
@@ -746,6 +760,23 @@ class ServerArgs:
 
         # Handle any other necessary validations.
         self._handle_other_validations()
+
+        self._handle_bullet_test()
+
+    def _handle_bullet_test(self):
+        if self.enable_bullet_engine:
+            logger.info("Bullet engine enabled, some args are overridden.")
+            assert not self.enable_dp_attention, "DP attention is not supported with bullet engine."
+            # self.enable_rpc_mempool = True
+            # self.disable_regex_jump_forward = True
+            # self.engines_per_gpu = 2
+            # if not self.enable_rpc_radix:
+            self.disable_radix_cache = True
+
+            # if self.dump_metric_interval_seconds > 0:
+            #     assert os.path.exists(self.dump_metric_base_path)
+            #     assert self.enable_record_timing
+            # self.chunked_prefill_size = -1
 
     def _handle_load_balance_method(self):
         if self.disaggregation_mode not in ("null", "prefill", "decode"):
@@ -4652,7 +4683,8 @@ class ServerArgs:
         args.ep_size = args.expert_parallel_size
 
         attrs = [attr.name for attr in dataclasses.fields(cls)]
-        return cls(**{attr: getattr(args, attr) for attr in attrs})
+        # return cls(**{attr: getattr(args, attr) for attr in attrs})
+        return cls(**{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)})
 
     def url(self):
         if is_valid_ipv6_address(self.host):

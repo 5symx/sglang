@@ -2179,7 +2179,27 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             mamba_track_indices=self.mamba_track_indices,
             mamba_track_mask=self.mamba_track_mask,
             mamba_track_seqlens=self.mamba_track_seqlens,
+            # bullet
+            total_tokens=self.get_total_tokens(),
         )
+
+    def get_total_tokens(self):
+        """Total number of tokens in the batch, input + output"""
+        if self.forward_mode.is_decode():
+            return sum(len(req.origin_input_ids) + len(req.output_ids) for req in self.reqs)
+        return None
+
+    def get_longest_queue_ms(self):
+        """Get the longest queue time in ms."""
+        if self.forward_mode.is_extend():
+            mx = -1
+            for req in self.reqs:
+                if req.timing_state is not None:
+                    req.timing_state.queue_time = req.queue_time_end - req.queue_time_start
+                    mx = max(mx, req.timing_state.queue_time)
+            return 1000 * mx
+        else:
+            return None
 
     def copy(self):
         # Only contain fields that will be used by process_batch_result
@@ -2313,3 +2333,6 @@ class ModelWorkerBatch:
     mamba_track_indices: Optional[torch.Tensor] = None  # shape: [b], int64
     mamba_track_mask: Optional[torch.Tensor] = None  # shape: [b], bool
     mamba_track_seqlens: Optional[torch.Tensor] = None  # shape: [b], int64
+
+    # bullet
+    total_tokens: int = -1
