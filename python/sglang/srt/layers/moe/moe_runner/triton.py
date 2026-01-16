@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
+import logging
+
 import torch
 import triton.language as tl
 
@@ -57,6 +59,7 @@ if _is_cuda or _is_hip:
         moe_align_block_size as sgl_moe_align_block_size,
     )
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TritonRunnerInput(RunnerInput):

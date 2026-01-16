@@ -245,7 +245,7 @@ class FusedMoE(torch.nn.Module):
             else:
                 gpu_method = UnquantizedFusedMoEMethod(self.use_triton_kernels)
             self.quant_method = KTEPWrapperMethod(gpu_method, kt_config)
-            logger.debug(f"activate kt in fusedmoe") # - activate after load_model() in model_runner
+            # logger.debug(f"activate kt in fusedmoe") # - activate after load_model() in model_runner
         else:
             if quant_config is not None:
                 self.quant_method = quant_config.get_quant_method(self, prefix)
@@ -538,6 +538,7 @@ class FusedMoE(torch.nn.Module):
         shard_id: str,
         expert_id: Optional[int],
     ) -> None:
+        # logger.debug(f"weight loader in fusedmoe") # - here
         # if expert_id is None, then
         # all the experts are loaded at the same time
         if (
@@ -613,6 +614,8 @@ class FusedMoE(torch.nn.Module):
         ):
             if self.quant_method.num_gpu_experts != -1:
                 if expert_id >= self.quant_method.num_gpu_experts:
+                    return
+                if expert_id not in self.quant_method.valid_ids: 
                     return
 
         self._weight_loader_impl(

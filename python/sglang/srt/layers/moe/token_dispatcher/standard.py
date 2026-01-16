@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple, Optional
 
 import torch
+import logging
 
 from sglang.srt.distributed import (
     get_moe_expert_parallel_rank,
@@ -48,6 +49,9 @@ try:
     from flashinfer import fp4_quantize as fp4_quantize_flashinfer
 except ImportError:
     fp4_quantize = None
+
+
+logger = logging.getLogger(__name__)
 
 
 class StandardDispatchOutput(NamedTuple):
@@ -135,6 +139,7 @@ class StandardDispatcher(BaseDispatcher):
                 router_logits=topk_output.router_logits,  # never tested
             )
         else:
+            # logger.debug(f"execution for moe expert") # - here
             hidden_states = hidden_states
             hidden_states_scale = None
 

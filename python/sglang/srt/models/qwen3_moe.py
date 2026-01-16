@@ -233,7 +233,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             layer_id=layer_id,
         )
 
-        self.experts = get_moe_impl_class(quant_config)(
+        self.experts = get_moe_impl_class(quant_config)( # FusedMoe
             num_experts=config.num_experts
             + get_global_server_args().ep_num_redundant_experts,
             top_k=config.num_experts_per_tok,
@@ -273,10 +273,12 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             not get_moe_a2a_backend().is_deepep()
             and not get_moe_a2a_backend().is_ascend_fuseep()
         ):
+            # logger.debug(f"moe with forward_normal") - here
             return self.forward_normal(
                 hidden_states, should_allreduce_fusion, use_reduce_scatter
             )
         else:
+            # logger.debug(f"moe with forward_deepep")
             return self.forward_deepep(hidden_states, forward_batch)
 
     def get_moe_weights(self):
@@ -301,6 +303,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
+        # logger.debug(f"selected expert id is {topk_output.topk_ids[0]}")
         final_hidden_states = self.experts(hidden_states, topk_output)
         if (
             self.tp_size > 1

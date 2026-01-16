@@ -74,6 +74,7 @@ deffer expert test
 python3 benchmark/gsm8k/bench_sglang.py --num-questions 1 # 20
 #score 0.95~ / Latency: 23.514 s Output throughput: 143.869 token/s - 2 deffer expert
 #score 0.95~ / Latency: 15.450 s / Output throughput: 159.931 token/s - 0 deffer expert
+# Accuracy: 0.900 Latency: 33.967 s Output throughput: 87.585 token/s - CPU only
 python3 -m sglang.test.run_eval --port 8001 --eval-name gpqa --num-examples 10 --repeat 2 --thinking-mode qwen3
 #Repeat: 2, mean: 0.200 Scores: ['0.200', '0.200'] - 0 expert deffer
 #Repeat: 2, mean: 0.300 Scores: ['0.300', '0.300'] - 2 expert deffer
@@ -98,12 +99,59 @@ python3 -m sglang.test.run_eval --port 8001 --eval-name gpqa --num-examples 20 -
 ## get topk_output for FusedMoe to get the activate expert id
 when to activate moe
 load model - add log in FusedMoe to test for kt - check!
+Qwen3MoeForCausalLM - qwen2moemodel - qwen3 moe decode layer - 
+
+Qwen3MoeSparseMoeBlock - self.experts=get_moe_impl_class - FusedMoE - forward_normal() - self.topk - select_experts() - StandardTopKOutput
 
 ```bash
 --log-level debug 2>&1 | tee output-115.log
 ```
+# 16-01-2026
+## analysis expert popularity
+disable cuda graph for expert id get
+add debug in forward_normal() logger.debug(f"selected expert id is {topk_output.topk_ids[0]}")
+python scripts/my_test/analysis_log.py - different with mmlu/gqpa - 50% same.
+[ID]online analysis asynchronze - analysis and onload
+
+## expert selection for current impl.
+create weigth for GPU expert in kt_ep_wrapper.py
+quant_method UnquantizedFusedMoEMethod apply in run_moe_core() of FusedMoE
+
+forward_impl for FusedMoE
+dispatch method for CPU/GPU splitting - create class for configuration.
+StandardDispatcher
+
+**CPU execution for expert selection.**
+submit with all dispatch
+KTMoEWrapper submit_forward sync_forward - for all dispatch expert
 
 
+**GPU execution for expert selection.**
+change topkid
+mask dispatch output with topk expert id within election.
+UnquantizedFusedMoEMethod - MoeRunner/TritonRunnerCore of quant_method self.runner in moe runner
+
+output  = output + sync - cpu_output
+test for CPU only on sglang
+
+test for GPU expert execution
+set mask for disable GPU expert. - masked_topk_ids = mask_cpu_expert_ids(topk_ids, 0)
+#score for gsm8k Accuracy: 0.850 Latency: 34.007 s Output throughput: 103.478 token/s
+
+skipping expert by using masked_topk_ids = mask_cpu_expert_ids(topk_ids, self.num_gpu_experts/2) - less than self.num_gpu_experts.
+#score Accuracy: 0.650 Invalid: 0.000 Latency: 37.167 s Output throughput: 146.314 token/s
+
+
+load weigth in FusedMoE
+create_weight only empty contained
+weight_loader is called later (determined which layer to load with expert id ? )
+self._weight_loader_impl() - num_gpu_experts for this.
+if expert_id >= self.quant_method.num_gpu_experts - 3
+mask_cpu_expert_ids(topk_ids, self.num_gpu_experts - 3)
+
+valid_ids - num_experts=len(self.valid_ids)
+todo: update fusedmoe with weight loader with expert id in valid id
+set valid id with expert id in self.gpu_method.create_weights()
 
 
 

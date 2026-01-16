@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, List, Optional
-
+import logging 
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
@@ -52,6 +52,7 @@ try:
 except ImportError:
     flashinfer_cutlass_fused_moe = None
 
+logger = logging.getLogger(__name__)
 
 class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     """Unquantized method for embeddings."""
@@ -329,6 +330,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
     ) -> CombineInput:
+        # logger.debug(f"forward cuda for quant_method") # - here
         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         x = dispatch_output.hidden_states
@@ -396,6 +398,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                 )
                 return StandardCombineInput(hidden_states=output)
             else:
+                # logger.debug(f"cuda forward for quant_method impl") - here
                 quant_info = TritonMoeQuantInfo(
                     w13_weight=layer.w13_weight,
                     w2_weight=layer.w2_weight,
