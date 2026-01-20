@@ -112,6 +112,7 @@ disable cuda graph for expert id get
 add debug in forward_normal() logger.debug(f"selected expert id is {topk_output.topk_ids[0]}")
 python scripts/my_test/analysis_log.py - different with mmlu/gqpa - 50% same.
 [ID]online analysis asynchronze - analysis and onload
+analysis_log.py -- logger.debug(f"selected expert id is {topk_output.topk_ids[0]}")
 
 ## expert selection for current impl.
 create weigth for GPU expert in kt_ep_wrapper.py
@@ -154,4 +155,27 @@ todo: update fusedmoe with weight loader with expert id in valid id
 set valid id with expert id in self.gpu_method.create_weights()
 
 
+# 20-01-2026
+update _weight_loader_physical with valid_id
+update  mask_cpu_valid_expert_ids with local expert id  - GPU result check
+CPU result check
 
+mmlu result - 0.7(baseline) - 0.5 0.3 due to CPU expert selection.
+todo performance check
+
+## cpu expert
+self.wrapper = KTMoEWrapper(num_gpu_experts) - in kt of BaseMoEWrapper
+self.submit(layer, dispatch_output) - self.wrapper.submit_forward()
+**update submit with valid_id**
+logger.debug(f"selected expert id of cpu is {topk_ids}")       
+
+valid_ids: set num gpu expert to 127, set cpu KTMoEWrapper with num_gpu_expert with 0 
+gpu update with valid_ids cpu execute remain expert with expert id.
+
+expert id logger.debug(f"current load expert id with valid id is {temp_expert_id} map from {expert_id}")
+
+## update kt-kernel
+modify def select_deferred_experts() and reinstall kt-kernel `./install.sh` and `kt version`
+torch.gather with non -1 directly set -1 to false
+
+set valid id for both GPU / CPU test for performance & result.

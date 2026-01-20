@@ -114,8 +114,57 @@ def mask_cpu_expert_ids(topk_ids: torch.Tensor, num_gpu_experts: int) -> torch.T
     topk_ids[topk_ids >= num_gpu_experts] = -1
     return topk_ids
 
+
+
 @torch.compile(dynamic=True, backend=get_compiler_backend())
-def mask_cpu_valid_expert_ids(topk_ids: torch.Tensor, valid_ids: set, num_gpu_experts: int) -> torch.Tensor:
+def mask_gpu_valid_expert_ids(topk_ids: torch.Tensor, valid_ids: set, num_gpu_experts: int) -> torch.Tensor:
+    """Mask CPU expert IDs by setting them to -1.
+
+    This function masks expert IDs that should be computed on CPU (IDs >= num_gpu_experts)
+    so they won't be computed on GPU. The masked IDs are set to -1, which causes the
+    GPU MoE kernel to skip those experts.
+
+    Args:
+        topk_ids: Tensor of shape [num_tokens, top_k] containing expert IDs
+        num_gpu_experts: Number of experts that should run on GPU (experts 0 to num_gpu_experts-1)
+
+    Returns:
+        Modified topk_ids tensor with CPU expert IDs masked as -1
+    """
+    
+    # valid_ids_tensor = torch.tensor(list(valid_ids), dtype=topk_ids.dtype, device=topk_ids.device)
+    # mask_invalid  = ~torch.isin(topk_ids, valid_ids_tensor) # True where value is NOT in valid_ids 
+    # mask_out_of_range = topk_ids >= num_gpu_experts
+    # mask = mask_invalid | mask_out_of_range
+
+    # topk_ids = topk_ids.clone()
+    # topk_ids[mask] = -1
+
+    valid_ids_tensor = torch.tensor(list(valid_ids), dtype=topk_ids.dtype, device=topk_ids.device)
+
+    mask_invalid = ~torch.isin(topk_ids, valid_ids_tensor)  # True where NOT in valid_ids
+    mask_out_of_range = topk_ids >= num_gpu_experts
+    mask = mask_invalid | mask_out_of_range
+
+    # Build mapping global → local
+    sorted_ids = sorted(valid_ids)
+    id_to_index = {orig: idx for idx, orig in enumerate(sorted_ids)}
+
+    max_id = max(valid_ids) + 1
+    lookup = torch.full((max_id,), -1, dtype=topk_ids.dtype, device=topk_ids.device)
+    for orig, idx in id_to_index.items():
+        lookup[orig] = idx
+
+    # Clone and remap
+    topk_ids = topk_ids.clone()
+    topk_ids[mask] = -1
+    topk_ids = torch.where(topk_ids == -1, -1, lookup[topk_ids])
+
+    return topk_ids
+
+
+@torch.compile(dynamic=True, backend=get_compiler_backend())
+def mask_cpu_valid_expert_ids(topk_ids: torch.Tensor, valid_ids: set, num_experts: int) -> torch.Tensor:
     """Mask CPU expert IDs by setting them to -1.
 
     This function masks expert IDs that should be computed on CPU (IDs >= num_gpu_experts)
@@ -131,13 +180,17 @@ def mask_cpu_valid_expert_ids(topk_ids: torch.Tensor, valid_ids: set, num_gpu_ex
     """
     
     valid_ids_tensor = torch.tensor(list(valid_ids), dtype=topk_ids.dtype, device=topk_ids.device)
-    mask_invalid  = ~torch.isin(topk_ids, valid_ids_tensor) # True where value is NOT in valid_ids 
-    mask_out_of_range = topk_ids >= num_gpu_experts
-    mask = mask_invalid | mask_out_of_range
 
+    # Mask for valid IDs (True where value IS in valid_ids)
+    mask_valid = torch.isin(topk_ids, valid_ids_tensor)
+
+    # Clone and apply: set valid IDs to -1, leave others unchanged
     topk_ids = topk_ids.clone()
-    topk_ids[mask] = -1
+    topk_ids[mask_valid] = num_experts + 1
+
+
     return topk_ids
+
 
 class KTEPWrapperMethod(FusedMoEMethodBase):
     """Wrapper for any MoE quantization method to enable CPU-GPU expert parallelism.
@@ -188,7 +241,12 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         self._layer_params = None
 
         # self.valid_ids = torch.tensor([40, 46, 114, 103, 109, 19, 49, 23])
-        self.valid_ids = {40, 46, 114, 103, 109, 19, 49, 23}
+        # self.valid_ids = {40, 46, 114, 103, 109, 19, 49, 23}
+        # self.valid_ids = {40, 46, 114, 103}
+        self.valid_ids = {49, 114, 39, 40, 15, 103, 109, 19, 96, 13, 60, 23, 87, 121, 46, 73}
+        # self.valid_ids = None # {0, 1, 2, 3, 4, 5, 6, 7}
+        # self.valid_ids = {}
+        # self.valid_ids = set(range(16))
 
     def create_weights(
         self,
@@ -232,41 +290,60 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
 
         # 1. Create weights for GPU experts using the wrapped method
         # GPU experts: 0 to num_gpu_experts-1
-        # self.gpu_method.create_weights(
-        #     layer=layer,
-        #     num_experts=len(self.valid_ids),
-        #     hidden_size=hidden_size,
-        #     intermediate_size_per_partition=intermediate_size_per_partition,
-        #     params_dtype=params_dtype,
-        #     **extra_weight_attrs,
-        # )
-
-        self.gpu_method.create_weights(
-            layer=layer,
-            num_experts=self.num_gpu_experts,
-            hidden_size=hidden_size,
-            intermediate_size_per_partition=intermediate_size_per_partition,
-            params_dtype=params_dtype,
-            **extra_weight_attrs,
-        )
+        if self.valid_ids:
+            logger.debug(f"valid id for expert selection.")
+            self.gpu_method.create_weights(
+                layer=layer,
+                num_experts=len(self.valid_ids),
+                hidden_size=hidden_size,
+                intermediate_size_per_partition=intermediate_size_per_partition,
+                params_dtype=params_dtype,
+                **extra_weight_attrs,
+            )
+        else:
+            logger.debug(f"default methods without valid id for expert selection.")
+            self.gpu_method.create_weights(
+                layer=layer,
+                num_experts=self.num_gpu_experts,
+                hidden_size=hidden_size,
+                intermediate_size_per_partition=intermediate_size_per_partition,
+                params_dtype=params_dtype,
+                **extra_weight_attrs,
+            )
 
         # 2. Initialize KT wrapper for CPU experts
         # CPU experts: num_gpu_experts to num_experts-1
         if self.tp_rank == 0:
-            self.wrapper = KTMoEWrapper(
-                layer_idx=self.kt_config.layer_idx,
-                num_experts=num_experts,
-                num_experts_per_tok=num_experts_per_tok,
-                hidden_size=hidden_size,
-                moe_intermediate_size=intermediate_size_full,
-                num_gpu_experts=self.num_gpu_experts, # add: might need set to 0 for all init
-                cpuinfer_threads=self.kt_config.cpuinfer_threads,
-                threadpool_count=self.kt_config.threadpool_count,
-                weight_path=self.kt_config.weight_path,
-                chunked_prefill_size=self.kt_config.chunked_prefill_size,
-                method=self.kt_config.method,
-                max_deferred_experts_per_token=layer_max_deferred,
-            )
+            if self.valid_ids:
+                self.wrapper = KTMoEWrapper(
+                    layer_idx=self.kt_config.layer_idx,
+                    num_experts=num_experts,
+                    num_experts_per_tok=num_experts_per_tok,
+                    hidden_size=hidden_size,
+                    moe_intermediate_size=intermediate_size_full,
+                    num_gpu_experts=0, #self.num_gpu_experts, # add: might need set to 0 for all init
+                    cpuinfer_threads=self.kt_config.cpuinfer_threads,
+                    threadpool_count=self.kt_config.threadpool_count,
+                    weight_path=self.kt_config.weight_path,
+                    chunked_prefill_size=self.kt_config.chunked_prefill_size,
+                    method=self.kt_config.method,
+                    max_deferred_experts_per_token=layer_max_deferred,
+                )
+            else:
+                self.wrapper = KTMoEWrapper(
+                    layer_idx=self.kt_config.layer_idx,
+                    num_experts=num_experts,
+                    num_experts_per_tok=num_experts_per_tok,
+                    hidden_size=hidden_size,
+                    moe_intermediate_size=intermediate_size_full,
+                    num_gpu_experts=self.num_gpu_experts, # add: might need set to 0 for all init
+                    cpuinfer_threads=self.kt_config.cpuinfer_threads,
+                    threadpool_count=self.kt_config.threadpool_count,
+                    weight_path=self.kt_config.weight_path,
+                    chunked_prefill_size=self.kt_config.chunked_prefill_size,
+                    method=self.kt_config.method,
+                    max_deferred_experts_per_token=layer_max_deferred,
+                )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Process weights after loading from checkpoint.
@@ -330,15 +407,35 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         if self.tp_rank != 0 or self.wrapper is None:
             return
 
-        x = dispatch_output.hidden_states
-        topk_output = dispatch_output.topk_output
-        topk_weights, topk_ids, _ = topk_output
+        # x = dispatch_output.hidden_states
+        # topk_output = dispatch_output.topk_output
+        # topk_weights, topk_ids, _ = topk_output
 
         # Submit forward task to CPU (non-blocking)
+        # self.wrapper.submit_forward(
+        #     x, topk_ids, topk_weights, torch.cuda.current_stream(x.device).cuda_stream
+        # )
+
+        x = dispatch_output.hidden_states
+        topk_output = dispatch_output.topk_output
+        
+        # logger.debug(f"selected expert id of cpu is {topk_ids}"       
+
+        if not self.valid_ids:
+            topk_weights, topk_ids, _ = topk_output
+            # Submit forward task to CPU (non-blocking)
+        else:
+            topk_weights, topk_ids, _ = topk_output
+            topk_ids = mask_cpu_valid_expert_ids(topk_ids, self.valid_ids, self.global_num_experts)
+            
+        # logger.debug(f"selected expert id of cpu is {topk_ids}")
+
         self.wrapper.submit_forward(
             x, topk_ids, topk_weights, torch.cuda.current_stream(x.device).cuda_stream
         )
+        
 
+        
     def sync(self, x: torch.Tensor) -> torch.Tensor:
         """Synchronize and retrieve CPU expert computation results.
 
@@ -394,9 +491,12 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         # Step 2: Prepare GPU computation by masking CPU expert IDs
         # CPU expert IDs (>= num_gpu_experts) are set to -1 so GPU kernel skips them
         topk_ids = topk_output.topk_ids
-        # masked_topk_ids = mask_cpu_expert_ids(topk_ids, self.num_gpu_experts)
+
+        if not self.valid_ids:
+            masked_topk_ids = mask_cpu_expert_ids(topk_ids, self.num_gpu_experts)
         # masked_topk_ids = mask_cpu_expert_ids(topk_ids, self.num_gpu_experts - 3) # 0 skip expert setting
-        masked_topk_ids = mask_cpu_valid_expert_ids(topk_ids, self.valid_ids, self.num_gpu_experts)
+        else:
+            masked_topk_ids = mask_gpu_valid_expert_ids(topk_ids, self.valid_ids, self.num_gpu_experts)
 
         # Create modified dispatch output for GPU computation
         masked_topk_output = topk_output._replace(topk_ids=masked_topk_ids)

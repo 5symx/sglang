@@ -558,7 +558,7 @@ class FusedMoE(torch.nn.Module):
 
         global_expert_location_metadata = get_global_expert_location_metadata()
         if global_expert_location_metadata is None:
-            if not getattr(param, "_sglang_require_global_experts", False):
+            if not getattr(param, "_sglang_require_global_experts", False): # ep
                 expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
                 if expert_id == -1:
                     return
@@ -594,6 +594,9 @@ class FusedMoE(torch.nn.Module):
                 expert_id=physical_expert_id,
             )
 
+    
+
+    
     def _weight_loader_physical(
         self,
         param: torch.nn.Parameter,
@@ -602,6 +605,12 @@ class FusedMoE(torch.nn.Module):
         shard_id: str,
         expert_id: int,
     ) -> None:
+
+        def map_valid_expert_id(valid_ids: set, expert_id: int):
+            sorted_ids = sorted(valid_ids)
+            id_to_index = {orig: idx for idx, orig in enumerate(valid_ids)}
+            return id_to_index[expert_id]
+
         # WARN: This makes the `expert_id` mean "local" and "global" in different cases
         if not getattr(param, "_sglang_require_global_experts", False):
             expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
@@ -615,16 +624,28 @@ class FusedMoE(torch.nn.Module):
             if self.quant_method.num_gpu_experts != -1:
                 if expert_id >= self.quant_method.num_gpu_experts:
                     return
-                if expert_id not in self.quant_method.valid_ids: 
+                if self.quant_method.valid_ids and expert_id not in self.quant_method.valid_ids: 
                     return
-
-        self._weight_loader_impl(
-            param=param,
-            loaded_weight=loaded_weight,
-            weight_name=weight_name,
-            shard_id=shard_id,
-            expert_id=expert_id,
-        )
+        # add
+        if self.quant_method.valid_ids:
+            temp_expert_id = map_valid_expert_id(self.quant_method.valid_ids, expert_id)
+            # logger.debug(f"current load expert id with valid id is {temp_expert_id} map from {expert_id}")
+            self._weight_loader_impl(
+                param=param,
+                loaded_weight=loaded_weight,
+                weight_name=weight_name,
+                shard_id=shard_id,
+                expert_id=temp_expert_id,
+            )
+        else:
+            # logger.debug(f"current load expert id is {expert_id}")
+            self._weight_loader_impl(
+                param=param,
+                loaded_weight=loaded_weight,
+                weight_name=weight_name,
+                shard_id=shard_id,
+                expert_id=expert_id,
+            )
 
     def _weight_loader_impl(
         self,
