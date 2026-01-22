@@ -282,6 +282,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
+        # logger.debug(f"selected expert id is {topk_output.topk_ids.flatten()}")
         return self.experts(hidden_states, topk_output)
 
     def forward_normal_dual_stream(
@@ -615,8 +616,15 @@ class Qwen2MoeModel(nn.Module):
         if self.pp_group.is_first_rank:
             if input_embeds is None:
                 hidden_states = self.embed_tokens(input_ids)
+
+                logger.debug(f"hidden state shape {hidden_states.shape}")
+                for i in range(hidden_states.size(0)):
+                    logger.debug(f"Request {i} : selected hidden state is {hidden_states[i].tolist()} \
+                        at layer 0")
+                        
             else:
                 hidden_states = input_embeds
+            
             residual = None
         else:
             assert pp_proxy_tensors is not None

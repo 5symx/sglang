@@ -303,7 +303,12 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
-        # logger.debug(f"selected expert id is {topk_output.topk_ids[0]}")
+
+        if self.layer_id == 47:
+            logger.debug(f"topk_output.topk_ids shape {topk_output.topk_ids.shape}")
+            for i in range(topk_output.topk_ids.size(0)):
+                logger.debug(f"Request {i} : selected expert id is {topk_output.topk_ids[i].tolist()} at layer {self.layer_id}")
+        
         final_hidden_states = self.experts(hidden_states, topk_output)
         if (
             self.tp_size > 1

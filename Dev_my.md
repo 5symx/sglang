@@ -72,6 +72,7 @@ python -m sglang.launch_server   --host 127.0.0.1   --port 8001   --model-path /
 deffer expert test
 ```bash
 python3 benchmark/gsm8k/bench_sglang.py --num-questions 1 # 20
+python3 benchmark/mmlu/bench_sglang.py --nsub 10 --data_dir benchmark/mmlu/data
 #score 0.95~ / Latency: 23.514 s Output throughput: 143.869 token/s - 2 deffer expert
 #score 0.95~ / Latency: 15.450 s / Output throughput: 159.931 token/s - 0 deffer expert
 # Accuracy: 0.900 Latency: 33.967 s Output throughput: 87.585 token/s - CPU only
@@ -110,7 +111,7 @@ Qwen3MoeSparseMoeBlock - self.experts=get_moe_impl_class - FusedMoE - forward_no
 ## analysis expert popularity
 disable cuda graph for expert id get
 add debug in forward_normal() logger.debug(f"selected expert id is {topk_output.topk_ids[0]}")
-python scripts/my_test/analysis_log.py - different with mmlu/gqpa - 50% same.
+**python scripts/my_test/analysis_log.py** - different with mmlu/gqpa - 50% same.
 [ID]online analysis asynchronze - analysis and onload
 analysis_log.py -- logger.debug(f"selected expert id is {topk_output.topk_ids[0]}")
 
@@ -179,3 +180,111 @@ modify def select_deferred_experts() and reinstall kt-kernel `./install.sh` and 
 torch.gather with non -1 directly set -1 to false
 
 set valid id for both GPU / CPU test for performance & result.
+
+# 2026-01-21
+```bash
+python -m sglang.launch_server   --host 127.0.0.1   --port 8001   --model-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B   --mem-fraction-static 0.92   --chunked-prefill-size 4096   --served-model-name Qwen3-30B-A3B   --enable-mixed-chunk   --kt-method AMXINT8   --kt-weight-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B-INT8   --kt-cpuinfer 32   --kt-threadpool-count 2   --kt-num-gpu-experts 32   --kt-max-deferred-experts-per-token 0 --disable-cuda-graph --log-level debug
+
+python -m sglang.launch_server   --host 127.0.0.1   --port 8001   --model-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B   --mem-fraction-static 0.92   --chunked-prefill-size 4096   --served-model-name Qwen3-30B-A3B   --enable-mixed-chunk   --kt-method AMXINT8   --kt-weight-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B-INT8   --kt-cpuinfer 32   --kt-threadpool-count 2   --kt-num-gpu-experts 127   --kt-max-deferred-experts-per-token 0 --disable-cuda-graph --log-level debug 2>&1 | tee output-121.log
+```
+## gsm8k activate expert
+analysis with original impl 
+- qwen3_moe add selected expert id 
+- set valid_ids to None
+- set benchmark with num_question 20
+24/31 same expert id 70%~
+test with valid id impl
+- set valid_id to 31 
+accuracy drop - performance increase.
+
+# qwen2
+
+```bash
+/data0/ymx/.cache/huggingface/hub/models--deepseel-ai--DeepSeek-V2-Lite
+/models--Qwen--Qwen3-Next-80B-A3B-Instruct
+
+python scripts/convert_cpu_weights.py \
+  --input-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen2-57B-A14B \
+  --input-type bf16 \
+  --output /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen2-57B-A14B-INT8 \
+  --quant-method int8
+
+
+# disable valid id 
+python -m sglang.launch_server   --host 127.0.0.1   --port 8001   --model-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B   --mem-fraction-static 0.92   --chunked-prefill-size 4096   --served-model-name Qwen3-30B-A3B   --enable-mixed-chunk   --kt-method AMXINT8   --kt-weight-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B-INT8   --kt-cpuinfer 32   --kt-threadpool-count 2   --kt-num-gpu-experts 16   --kt-max-deferred-experts-per-token 0 --disable-cuda-graph --log-level debug 2>&1 | tee output-121.log
+
+# enable valid_id
+python -m sglang.launch_server   --host 127.0.0.1   --port 8001   --model-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen2-57B-A14B   --mem-fraction-static 0.92   --chunked-prefill-size 4096   --served-model-name Qwen2-57B-A14B   --enable-mixed-chunk   --kt-method AMXINT8   --kt-weight-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen2-57B-A14B-INT8   --kt-cpuinfer 32   --kt-threadpool-count 2   --kt-num-gpu-experts 1000   --kt-max-deferred-experts-per-token 0 --disable-cuda-graph --log-level debug 2>&1 | tee output-121.log
+
+./models--Qwen--Qwen2-57B-A14B/
+
+```
+
+update qwen2_moe.py with log shared_expert and selected expert id 
+- shared expert is tensor in model weight. just ignore
+- "num_experts": 64,   "num_experts_per_tok": 8,
+- in this file update logger.debug(f"selected expert id is {topk_output.topk_ids[0]}") in forward()
+
+# deepseek v2 lite
+```bash
+
+/data0/ymx/.cache/huggingface/hub/models--deepseel-ai--DeepSeek-V2-Lite
+
+python scripts/convert_cpu_weights.py \
+  --input-path /data0/ymx/.cache/huggingface/hub/models--deepseel-ai--DeepSeek-V2-Lite \
+  --input-type bf16 \
+  --output /data0/ymx/.cache/huggingface/hub/models--deepseel-ai--DeepSeek-V2-Lite-INT8 \
+  --quant-method int8
+
+python -m sglang.launch_server   --host 127.0.0.1   --port 8001   --model-path /data0/ymx/.cache/huggingface/hub/models--deepseel-ai--DeepSeek-V2-Lite   --mem-fraction-static 0.92   --chunked-prefill-size 4096   --served-model-name Qwen2-57B-A14B   --enable-mixed-chunk   --kt-method AMXINT8   --kt-weight-path /data0/ymx/.cache/huggingface/hub/models--deepseel-ai--DeepSeek-V2-Lite-INT8   --kt-cpuinfer 32   --kt-threadpool-count 2   --kt-num-gpu-experts 16   --kt-max-deferred-experts-per-token 0 --disable-cuda-graph --log-level debug 2>&1 | tee output-121.log
+
+  "n_routed_experts": 64,
+  "n_shared_experts": 2,
+  "norm_topk_prob": false,
+  "num_attention_heads": 16,
+  "num_experts_per_tok": 6,
+
+```
+
+# 22-01-2026
+
+## prediction model
+```bash
+# create dataset from log
+python scripts/my_test/analysis_log_list.py
+# train prediction model
+python python/sglang/srt/predictor/prediction_labels_simple.py
+```
+### create dataset
+add qwen2_moe with hidden_state output
+```python
+for i in range(hidden_states.size(0)):
+  logger.debug(f"Request {i} : selected expert id is {topk_output.topk_ids[i].tolist()} \
+      at layer 0")
+```
+
+add qwen3_moe
+```python
+for i in range(topk_output.topk_ids.size(0)):
+  logger.debug(f"Request {i} : selected expert id is {topk_output.topk_ids[i].tolist()} at layer {self.layer_id}")
+
+```
+### train impl
+```bash
+# last layer prediction for layer 47 in qwen3
+python scripts/my_test/analysis_log_list.py
+python python/sglang/srt/predictor/prediction_labels_simple_last.py
+
+# train an expert activate model based on embedding to expert of last layer
+# mmlu to gsm8k accuracy 32/8 80% contains; 16/8 60% contains;
+```
+
+## qwen3 next test for result
+```bash
+
+python -m sglang.launch_server   --host 127.0.0.1   --port 8001   --model-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen3-Next-80B-A3B-Instruct   --mem-fraction-static 0.92   --chunked-prefill-size 4096   --served-model-name Qwen3-Next-80B-A3B   --enable-mixed-chunk   --kt-method AMXINT8   --kt-weight-path /data0/ymx/.cache/huggingface/hub/models--Qwen--Qwen3-Next-80B-A3B-Instruct-INT8   --kt-cpuinfer 32   --kt-threadpool-count 2   --kt-num-gpu-experts 16   --kt-max-deferred-experts-per-token 0 --disable-cuda-graph --log-level debug 2>&1 | tee output-122.log
+
+#  "num_experts": 512,
+#  "num_experts_per_tok": 10,
+#  "shared_expert_intermediate_size": 512,
+```

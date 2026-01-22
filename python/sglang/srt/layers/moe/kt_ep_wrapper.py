@@ -215,6 +215,7 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         self,
         gpu_method: FusedMoEMethodBase,
         kt_config: KTConfig,
+        num_experts: int,
     ):
         """Initialize the KT EP wrapper.
 
@@ -227,6 +228,7 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 "kt_kernel is not installed. To use KTransformers EP wrapper, please install kt_kernel."
             )
 
+        self.num_experts = num_experts
         self.gpu_method = gpu_method
         self.kt_config = kt_config
         self.num_gpu_experts = kt_config.num_gpu_experts
@@ -240,13 +242,21 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         # Store parameters needed for KT initialization
         self._layer_params = None
 
-        # self.valid_ids = torch.tensor([40, 46, 114, 103, 109, 19, 49, 23])
-        # self.valid_ids = {40, 46, 114, 103, 109, 19, 49, 23}
-        # self.valid_ids = {40, 46, 114, 103}
-        self.valid_ids = {49, 114, 39, 40, 15, 103, 109, 19, 96, 13, 60, 23, 87, 121, 46, 73}
-        # self.valid_ids = None # {0, 1, 2, 3, 4, 5, 6, 7}
+
+        if self.num_gpu_experts > self.num_experts - 1:
+            # qwen 2
+            # self.valid_ids = {58, 28, 60, 52, 49, 38, 32, 47, 43, 55, 44, 42, 50, 41, 14}
+            self.valid_ids = {43, 58, 54, 21, 57, 29, 55, 38, 49, 48, 28, 19, 44, 60, 45}
+        else:
+            self.valid_ids = None # {0, 1, 2, 3, 4, 5, 6, 7}
         # self.valid_ids = {}
-        # self.valid_ids = set(range(16))
+        # self.valid_ids = set(range(32))
+        # GSM8K
+        # self.valid_ids = {4, 27, 99, 18, 22, 58, 2, 112, 65, 30, 87, 75, 44, 52, 16, 53,  \
+        #    45, 48, 9, 103, 11, 46, 12, 34, 37, 41, 124, 107, 91, 71, 122}
+        # mmlu
+        # self.valid_ids = {52, 39, 103, 18, 95, 127, 123, 46, 9, 107, 49, 112, 88, 58, 99, 60, \
+        #     30, 109, 53, 8, 15, 65, 55, 71, 36, 63, 122, 45, 48, 22, 37}
 
     def create_weights(
         self,
@@ -426,7 +436,7 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
             # Submit forward task to CPU (non-blocking)
         else:
             topk_weights, topk_ids, _ = topk_output
-            topk_ids = mask_cpu_valid_expert_ids(topk_ids, self.valid_ids, self.global_num_experts)
+            # topk_ids = mask_cpu_valid_expert_ids(topk_ids, self.valid_ids, self.global_num_experts)
             
         # logger.debug(f"selected expert id of cpu is {topk_ids}")
 
@@ -497,7 +507,7 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         # masked_topk_ids = mask_cpu_expert_ids(topk_ids, self.num_gpu_experts - 3) # 0 skip expert setting
         else:
             masked_topk_ids = mask_gpu_valid_expert_ids(topk_ids, self.valid_ids, self.num_gpu_experts)
-
+            # logger.debug(f"selected expert id of gpu is {masked_topk_ids}")
         # Create modified dispatch output for GPU computation
         masked_topk_output = topk_output._replace(topk_ids=masked_topk_ids)
         masked_dispatch_output = dispatch_output._replace(
@@ -513,6 +523,7 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         if self.tp_rank == 0:
             cpu_output = self.sync(x)
             output = output + cpu_output
+            # output = cpu_output
 
         return StandardCombineInput(hidden_states=output)
 

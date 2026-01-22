@@ -1,4 +1,5 @@
-import re
+import re, ast
+import numpy as np
 from collections import Counter
 
 def parse_expert_ids_from_log(log_file, top_k=10):
@@ -10,27 +11,39 @@ def parse_expert_ids_from_log(log_file, top_k=10):
         top_k (int): Number of most popular IDs to display.
     """
     id_counter = Counter()
+
     
-    # Regex to capture numbers inside tensor([...])
-    pattern = re.compile(r"tensor\(\[([^\]]+)\]")
+    # #Regex to capture numbers inside tensor([...])
+    # pattern = re.compile(r"tensor\(\[([^\]]+)\]")
+    pattern = re.compile(r"selected expert id is \[([^\]]+)\] at layer 47")
+
     
     with open(log_file, "r") as f:
         for line in f:
             match = pattern.search(line)
             if match:
+                ids = []
+                for x in match.group(1).split(","):
+                    x = x.strip()
+                    if x.isdigit():              # only convert if it's a pure integer string
+                        ids.append(int(x))
+
                 # Extract numbers inside brackets
-                ids = [int(x.strip()) for x in match.group(1).split(",")]
+                # ids = [int(x.strip()) for x in match.group(1).split(",")]
                 # Only count valid IDs (0–127)
                 for i in ids:
                     if 0 <= i <= 127:
                         id_counter[i] += 1
     
+    expert_ids = list()
     # Print top-k popular IDs
     print(f"Top {top_k} popular expert IDs:")
     for expert_id, count in id_counter.most_common(top_k):
         print(f"Expert {expert_id}: {count} times")
+        expert_ids.append(expert_id)
+    print("Expert IDs set:", expert_ids[0:31])
 
 # Example usage
 if __name__ == "__main__":
-    log_path = "/home/ymx/sglang/output-116.log"   # replace with your actual log file path
-    parse_expert_ids_from_log(log_path, top_k=16)
+    log_path = "/home/ymx/sglang/output-122.log"   # replace with your actual log file path
+    parse_expert_ids_from_log(log_path, top_k=128)

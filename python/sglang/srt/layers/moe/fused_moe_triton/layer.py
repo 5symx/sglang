@@ -244,7 +244,7 @@ class FusedMoE(torch.nn.Module):
                 gpu_method = quant_config.get_quant_method(self, prefix)
             else:
                 gpu_method = UnquantizedFusedMoEMethod(self.use_triton_kernels)
-            self.quant_method = KTEPWrapperMethod(gpu_method, kt_config)
+            self.quant_method = KTEPWrapperMethod(gpu_method, kt_config, num_experts)
             # logger.debug(f"activate kt in fusedmoe") # - activate after load_model() in model_runner
         else:
             if quant_config is not None:

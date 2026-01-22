@@ -178,4 +178,5 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", "-s", type=str, default="results")
     parser.add_argument("--nsub", type=int, default=60)
     args = add_common_sglang_args_and_parse(parser)
+    args.port = 8001
     main(args)
